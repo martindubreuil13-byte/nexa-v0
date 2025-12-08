@@ -2,6 +2,17 @@ import streamlit as st
 import ingest_expert
 import match_engine
 import json
+import os
+import seed
+from sqlmodel import Session, select, SQLModel
+from models import Expert, engine
+
+# --- CLOUD FIX: API KEY CHECK ---
+api_key_present = False
+if os.environ.get("GOOGLE_API_KEY"):
+    api_key_present = True
+else:
+    api_key_present = False
 
 # Page Config
 st.set_page_config(
@@ -11,7 +22,10 @@ st.set_page_config(
 )
 
 # --- BRANDING & STYLING ---
-st.logo("logo.jpg")
+try:
+    st.logo("logo.jpg")
+except AttributeError:
+    pass # st.logo might not exist in older versions
 
 st.markdown("""
 <style>
@@ -55,9 +69,8 @@ with st.sidebar:
     
     st.divider()
     
-    # Mock status for API Key
-    import os
-    if os.environ.get("GOOGLE_API_KEY"):
+    # Status for API Key
+    if api_key_present:
         st.success("✅ Gemini API Key Detected")
     else:
         st.warning("⚠️ Using Mock LLM Mode")
@@ -66,8 +79,6 @@ with st.sidebar:
     
     st.subheader("📊 Database Status")
     try:
-        from sqlmodel import Session, select
-        from models import Expert, engine
         with Session(engine) as session:
             experts = session.exec(select(Expert)).all()
             st.metric("Total Experts", len(experts))
@@ -83,9 +94,6 @@ with st.sidebar:
     with col1:
         if st.button("⚠️ Reset (Seed)"):
             try:
-                import seed
-                from sqlmodel import SQLModel 
-                from models import engine
                 SQLModel.metadata.drop_all(engine)
                 SQLModel.metadata.create_all(engine)
                 seed.seed_data()
@@ -96,8 +104,6 @@ with st.sidebar:
     with col2:
         if st.button("🗑️ Nuke All"):
             try:
-                from sqlmodel import SQLModel
-                from models import engine
                 SQLModel.metadata.drop_all(engine)
                 SQLModel.metadata.create_all(engine)
                 st.toast("Nuked! DB Empty.", icon="☢️")
@@ -191,12 +197,6 @@ with tab2:
             st.write(f"Found {len(matches)} AI-Ranked Matches:")
             
             for m in matches:
-                # Find the full expert object from DB or just display what we have? 
-                # The prompt returns name, so we might want to look up details if we strictly need them,
-                # but for V0, displaying the Name + AI reason is key.
-                # Let's try to match it back to the DB object for extra context if possible, 
-                # or just display the AI output cleanly.
-                
                 with st.container(border=True):
                     c1, c2 = st.columns([3, 1])
                     with c1:

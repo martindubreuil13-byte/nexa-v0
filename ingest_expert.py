@@ -1,137 +1,114 @@
 import os
 import json
-import sys
-from sqlmodel import Session, create_engine, select
-import sys
+import google.generativeai as genai
 from sqlmodel import Session, select
+from dotenv import load_dotenv
 from models import Expert, engine
 
-# --- USER INPUT (Legacy/Test) ---
-RAW_PROFILE_TEXT = """
-Name: Martin (MINDRA)
-Headline: Founder & CEO
-... (Legacy text for direct run)
-"""
+# Force Load Environment Variables (for local testing compatibility)
+load_dotenv()
 
-def mock_llm_analysis(name: str, bio: str) -> str:
-    """Mock response."""
-    print(f"⚠️  No API Key found. Using MOCK LLM response for '{name}'.")
-    mock_data = {
-        "headline": "AI Consultant & Strategist", # Inferred headline if not explicitly passed
-        "domains": ["AI Strategy", "Executive Coaching", "Digital Transformation"],
-        "icp_focus": "SME Leaders & Enterprise Execs",
-        "strength_mix": {"strategy": 0.85, "execution": 0.15},
-        "confidence_score": 92,
-        "vetting_summary": f"Strong profile for {name}. Bio indicates deep experience in leadership and tech."
-    }
-    return json.dumps(mock_data)
-
-def analyze_profile(name: str, bio: str, links: str) -> dict:
+def analyze_profile(name: str, bio_text: str, links: str):
     """
-    Analyzes expert based on structured inputs.
-    links is a comma-separated string from the UI.
+    Uses Gemini to extract structured skills from raw text.
+    If it fails, it returns a visible error card, not mock data.
     """
     api_key = os.environ.get("GOOGLE_API_KEY")
     
     if not api_key:
-        return json.loads(mock_llm_analysis(name, bio))
+        # This should have been caught in app.py, but just in case
+        raise ValueError("❌ GOOGLE_API_KEY not found. Analysis failed.")
 
+    # Configure Gemini
+    genai.configure(api_key=api_key)
+    
+    # Auto-discover valid model (safer than hardcoding)
+    model_name = "models/gemini-1.5-flash"
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=api_key)
-        # Auto-discover a valid model
-        available_models = []
         for m in genai.list_models():
             if 'generateContent' in m.supported_generation_methods:
-                available_models.append(m.name)
-        # Prefer 'gemini-1.5' or 'gemini-pro', but take whatever works
-        model_name = next((m for m in available_models if 'gemini-1.5' in m), None)
-        if not model_name:
-            model_name = next((m for m in available_models if 'gemini' in m), available_models[0])
-        print(f"DEBUG: Selected Model: {model_name}")
-        model = genai.GenerativeModel(model_name)
+                if 'gemini-1.5' in m.name:
+                    model_name = m.name
+                    break
+    except:
+        pass
         
-        system_prompt = f"""
-        You are a Forensic Data Extractor. You are NOT a creative writer.
-        Input: Expert Bio ({name}).
-        Task: Extract exact keywords.
-        Constraint: Do NOT invent generic titles like 'AI Consultant' or 'Strategist'.
-        
-        Analyzing Expert: {name}
-        Context Links: {links}
-        Profile Content: {bio}
-        
-        JSON Output Requirements:
-        
-        1. headline: Must be a string of the top 3 most distinct hard skills found in the text, separated by ' | '. (Example: 'Omnichannel Strategy | Org Design | Retail AI').
-        2. domains: Extract 12-15 specific tags (e.g., 'Customer Experience', 'E-commerce Innovation').
-        3. fidelity_score: Rate from 0-100 based on how many specific methodologies are mentioned. (Generic = 20, Specific = 90). Using key 'confidence_score' for DB compatibility.
-        4. icp_focus: Extract the exact client type mentioned.
-        5. strength_mix: precise strategy vs execution split.
-        6. vetting_summary: brief forensic summary.
-        
-        OUTPUT FORMAT (JSON ONLY):
-        {{
-            "headline": "Skill 1 | Skill 2 | Skill 3",
-            "domains": ["Tag1", "Tag2", ...],
-            "icp_focus": "Specific Target",
-            "strength_mix": {{"strategy": 0.X, "execution": 0.Y}},
-            "confidence_score": 0-100,
-            "vetting_summary": "Forensic analysis..."
-        }}
-        """
-        
+    model = genai.GenerativeModel(model_name)
+
+    # The Forensic Prompt
+    system_prompt = f"""
+    You are a Forensic Data Extractor for an Expert Marketplace.
+    
+    INPUT PROFILE:
+    Name: {name}
+    Bio/Context: {bio_text}
+    Links: {links}
+    
+    TASK:
+    Extract specific hard skills and attributes. 
+    Do NOT summarize into generic titles like "Digital Marketer". Be specific.
+    
+    OUTPUT JSON ONLY:
+    {{
+        "headline": "A sharp, 3-part pipe-separated headline of specific skills (e.g. 'Facebook Ads | Conversion API | Pinterest Marketing')",
+        "domains": ["List", "of", "10+", "specific", "tags", "found", "in", "text"],
+        "icp_focus": "The exact business type they help (e.g. 'E-commerce Brands', 'Local Biz')",
+        "strength_mix": {{ "Strategy": 0.0, "Execution": 0.0 }},
+        "confidence_score": 90,
+        "vetting_summary": "2 sentences analyzing their specific expertise based on the text provided."
+    }}
+    """
+
+    try:
         response = model.generate_content(system_prompt)
-        cleaned_response = response.text.strip().replace('```json', '').replace('```', '')
-        return json.loads(cleaned_response)
-        
+        cleaned = response.text.strip().replace('```json', '').replace('```', '')
+        return json.loads(cleaned)
     except Exception as e:
-        print(f"❌ Error calling Gemini API: {e}")
-        return json.loads(mock_llm_analysis(name, bio))
+        # 🚨 THIS IS THE FIX: Return a clear error message instead of mock data 🚨
+        print(f"ERROR in AI Analysis: {e}")
+        return {
+            "headline": "⚠️ AI ANALYSIS FAILED - Check Logs/Key",
+            "domains": ["Error"],
+            "icp_focus": "Unknown",
+            "strength_mix": {"Strategy": 0, "Execution": 0},
+            "confidence_score": 0,
+            "vetting_summary": f"Error Log: {str(e)}"
+        }
 
-def save_expert(data: dict, name: str, bio: str, links: str):
-    # Parse links
-    link_list = [l.strip() for l in links.split(',') if l.strip()]
-    
-    # Check for duplicate
+def save_expert(analysis_data, name, bio, links):
+    """
+    Saves the analyzed expert to the DB.
+    """
     with Session(engine) as session:
-        existing = session.exec(select(Expert).where(Expert.name == name)).first()
-        if existing:
-            print(f"ℹ️  Expert '{name}' already exists. Updating (Force Overwrite)...")
-            existing.headline = data.get("headline", existing.headline)
-            existing.domains = data.get("domains", [])
-            existing.icp_focus = data.get("icp_focus", "General")
-            existing.strength_mix = data.get("strength_mix", {})
-            existing.confidence_score = data.get("confidence_score", 0)
-            existing.vetting_summary = data.get("vetting_summary", "")
-            existing.links = link_list
-            existing.mini_case_response = bio # Storing bio/case in this field for now
-            
-            session.add(existing)
-            session.commit()
-            session.refresh(existing)
-            return existing
-
-    expert = Expert(
-        name=name,
-        headline=data.get("headline", "Expert"),
-        rate=0.0, # Default, could extract if asked
-        links=link_list,
-        domains=data.get("domains", []),
-        icp_focus=data.get("icp_focus", "General"),
-        strength_mix=data.get("strength_mix", {}),
-        confidence_score=data.get("confidence_score", 0),
-        mini_case_response=bio,
-        vetting_summary=data.get("vetting_summary", "")
-    )
-    
-    with Session(engine) as session:
-        session.add(expert)
+        # Check if expert exists (by name) and update, or create new
+        existing_expert = session.exec(select(Expert).where(Expert.name == name)).first()
+        
+        if existing_expert:
+            expert = existing_expert
+            # Update fields
+            expert.headline = analysis_data.get("headline", "New Expert")
+            expert.domains = analysis_data.get("domains", [])
+            expert.icp_focus = analysis_data.get("icp_focus", "General")
+            expert.strength_mix = analysis_data.get("strength_mix", {})
+            expert.confidence_score = analysis_data.get("confidence_score", 50)
+            expert.vetting_summary = analysis_data.get("vetting_summary", "")
+            expert.mini_case_response = bio # Storing raw bio as case response for now
+            expert.links = links
+        else:
+            # Create new
+            expert = Expert(
+                name=name,
+                headline=analysis_data.get("headline", "New Expert"),
+                domains=analysis_data.get("domains", []),
+                icp_focus=analysis_data.get("icp_focus", "General"),
+                strength_mix=analysis_data.get("strength_mix", {}),
+                confidence_score=analysis_data.get("confidence_score", 50),
+                vetting_summary=analysis_data.get("vetting_summary", ""),
+                mini_case_response=bio,
+                links=links
+            )
+            session.add(expert)
+        
         session.commit()
         session.refresh(expert)
-        print(f"✅ Expert '{expert.name}' CREATED.")
         return expert
-
-if __name__ == "__main__":
-    # Test run
-    analyze_profile("Test User", "Bio here...", "http://example.com")

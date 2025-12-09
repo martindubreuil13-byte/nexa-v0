@@ -14,7 +14,7 @@ class Expert(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str
     headline: str
-    rate: float
+    rate: float | None = None
     links: List[str] = Field(default=[], sa_column=Column(JSON))
     
     # AI-derived fields

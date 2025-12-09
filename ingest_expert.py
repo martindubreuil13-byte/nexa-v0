@@ -22,17 +22,11 @@ def analyze_profile(name: str, bio_text: str, links: str):
     # Configure Gemini
     genai.configure(api_key=api_key)
     
-    # Auto-discover valid model (safer than hardcoding)
-    model_name = "models/gemini-1.5-flash"
-    try:
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                if 'gemini-1.5' in m.name:
-                    model_name = m.name
-                    break
-    except:
-        pass
-        
+# FIX: Set the model to a stable, generally available name.
+    model_name = "gemini-2.5-flash" # Using the latest recommended stable name.
+    
+    # We remove the complex auto-discovery that was causing the 404 error.
+    
     model = genai.GenerativeModel(model_name)
 
     # The Forensic Prompt
